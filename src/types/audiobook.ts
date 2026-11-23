@@ -6,6 +6,25 @@ export type PlaybackStatus = 'idle' | 'playing' | 'paused';
 
 export type DetectedLanguage = 'ko-KR' | 'en-US';
 
+export type ThemeMode = 'light' | 'dark';
+
+export type HighlightColor = 'yellow' | 'emerald' | 'sky';
+
+export interface TextHighlightRange {
+  id: string;
+  start: number;
+  end: number;
+  color: HighlightColor;
+}
+
+export interface ParagraphAnnotation {
+  paragraphHighlight?: HighlightColor;
+  ranges: TextHighlightRange[];
+  memo?: string;
+}
+
+export type DocumentAnnotations = Record<number, ParagraphAnnotation>;
+
 export interface GeneratedScriptResult {
   script: string;
   paragraphs: string[];

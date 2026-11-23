@@ -1,0 +1,13 @@
+# Core PDF parsing & Gemini refinement
+pymupdf>=1.24.0
+google-genai>=1.0.0
+
+# Local TTS (Free / Demo)
+edge-tts>=6.1.12
+
+# Environment variable management (Optional)
+python-dotenv>=1.0.0
+
+# Commercial TTS for SaaS (Uncomment if needed)
+# google-cloud-texttospeech>=2.16.0
+# openai>=1.30.0

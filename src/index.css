@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
   --font-sans: "Plus Jakarta Sans", "Noto Sans KR", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif;
@@ -19,4 +20,60 @@
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+@keyframes speaking-bar-flow {
+  0% {
+    background-position: 0% 0%;
+    transform: scaleY(0.92);
+    opacity: 0.85;
+  }
+  50% {
+    background-position: 0% 100%;
+    transform: scaleY(1);
+    opacity: 1;
+  }
+  100% {
+    background-position: 0% 0%;
+    transform: scaleY(0.92);
+    opacity: 0.85;
+  }
+}
+
+@keyframes eq-bar {
+  0%, 100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.animate-speaking-bar {
+  background-size: 100% 220%;
+  animation: speaking-bar-flow 1.6s ease-in-out infinite;
+}
+
+.animate-eq-1 {
+  animation: eq-bar 0.85s ease-in-out infinite;
+}
+
+.animate-eq-2 {
+  animation: eq-bar 0.85s ease-in-out 0.2s infinite;
+}
+
+.animate-eq-3 {
+  animation: eq-bar 0.85s ease-in-out 0.4s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .animate-speaking-bar,
+  .animate-eq-1,
+  .animate-eq-2,
+  .animate-eq-3 {
+    animation: none;
+  }
 }

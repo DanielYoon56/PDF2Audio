@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, X } from 'lucide-react';
 import { Header } from './components/Header';
 import { UploadPanel } from './components/UploadPanel';
@@ -12,6 +12,7 @@ import type {
   ConversionMode,
   DetectedLanguage,
   GeneratedScriptResult,
+  ThemeMode,
   WaitlistFormValues,
 } from './types/audiobook';
 import { fileToBase64 } from './utils/fileHelpers';
@@ -19,6 +20,7 @@ import { exportWaitlistCsv, submitWaitlistEntry } from './utils/waitlistStorage'
 
 // 외부 폼/웹훅 연동 URL (비워두어도 localStorage에 안전하게 저장됩니다)
 const WEBHOOK_URL = 'https://formspree.io/f/xgakpoyg';
+const THEME_STORAGE_KEY = 'paperaudio_theme';
 
 interface GenerateApiResponse {
   script?: string;
@@ -27,7 +29,19 @@ interface GenerateApiResponse {
   error?: string;
 }
 
+function getInitialTheme(): ThemeMode {
+  if (typeof window === 'undefined') return 'light';
+  try {
+    const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (saved === 'dark' || saved === 'light') return saved;
+  } catch {
+    // Ignore storage access errors
+  }
+  return document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+}
+
 export default function App() {
+  const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [mode, setMode] = useState<ConversionMode>('ko-translate');
@@ -39,6 +53,20 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const toastTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle('dark', theme === 'dark');
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // Ignore storage access errors
+    }
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  };
 
   const targetLanguage: DetectedLanguage =
     result?.detectedLanguage ?? (mode === 'ko-translate' ? 'ko-KR' : 'en-US');
@@ -149,24 +177,33 @@ export default function App() {
   };
 
   return (
-    <div id="top" className="min-h-screen flex flex-col bg-[#F8FAFC] text-slate-900">
-      <Header onOpenWaitlist={() => setIsWaitlistOpen(true)} />
+    <div
+      id="top"
+      className="min-h-screen flex flex-col bg-[#F8FAFC] dark:bg-[#0B1120] text-slate-900 dark:text-slate-100 transition-colors duration-300"
+    >
+      <Header
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        onOpenWaitlist={() => setIsWaitlistOpen(true)}
+      />
 
       <main className="flex-1 w-full max-w-[1360px] mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
         {/* Global API Error Banner */}
         {apiError && (
           <div
             role="alert"
-            className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3.5 flex items-start justify-between gap-3 text-sm text-red-800"
+            className="mb-6 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-4 py-3.5 flex items-start justify-between gap-3 text-sm text-red-800 dark:text-red-200 transition-colors duration-300"
           >
             <div className="flex items-start gap-2.5">
               <AlertCircle
-                className="w-5 h-5 text-red-600 shrink-0 mt-0.5"
+                className="w-5 h-5 text-red-600 dark:text-red-400 shrink-0 mt-0.5"
                 aria-hidden="true"
               />
               <div>
-                <p className="font-semibold text-red-900">대본 생성에 실패했습니다</p>
-                <p className="mt-0.5 text-xs sm:text-sm text-red-700 leading-relaxed">
+                <p className="font-semibold text-red-900 dark:text-red-100">
+                  대본 생성에 실패했습니다
+                </p>
+                <p className="mt-0.5 text-xs sm:text-sm text-red-700 dark:text-red-300 leading-relaxed">
                   {apiError}
                 </p>
               </div>
@@ -175,7 +212,7 @@ export default function App() {
               type="button"
               onClick={() => setApiError(null)}
               aria-label="오류 메시지 닫기"
-              className="p-1 text-red-500 hover:text-red-700 hover:bg-red-100 rounded-md transition-colors shrink-0"
+              className="p-1 text-red-500 dark:text-red-400 hover:text-red-700 dark:hover:text-red-200 hover:bg-red-100 dark:hover:bg-red-900/50 rounded-md transition-colors shrink-0"
             >
               <X className="w-4 h-4" aria-hidden="true" />
             </button>
@@ -184,7 +221,6 @@ export default function App() {
 
         {/* Two-column SaaS Studio Workspace */}
         <div className="grid grid-cols-1 lg:grid-cols-[360px_minmax(0,1fr)] xl:grid-cols-[380px_minmax(0,1fr)] gap-6 items-start">
-          {/* Left Panel: PDF Upload & Options */}
           <div className="lg:sticky lg:top-6">
             <UploadPanel
               selectedFile={selectedFile}
@@ -198,10 +234,9 @@ export default function App() {
             />
           </div>
 
-          {/* Right Panel: Sticky Audio Player, Early-Bird Banner & Synced Script */}
           <section
             aria-label="샘플 오디오 플레이어 및 낭독 대본"
-            className="bg-white border border-slate-200 rounded-xl min-h-[540px] flex flex-col"
+            className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl min-h-[540px] flex flex-col transition-colors duration-300"
           >
             <AudioPlayerBar
               player={player}
@@ -233,12 +268,11 @@ export default function App() {
         onSubmit={handleWaitlistSubmit}
       />
 
-      {/* Brief toast for admin CSV export feedback */}
       {toastMessage && (
         <div
           role="status"
           aria-live="polite"
-          className="fixed bottom-5 right-5 z-50 max-w-sm rounded-lg border border-slate-200 bg-slate-900 text-white px-4 py-3 text-xs font-medium shadow-lg flex items-center gap-2"
+          className="fixed bottom-5 right-5 z-50 max-w-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-900 dark:bg-slate-800 text-white px-4 py-3 text-xs font-medium shadow-lg flex items-center gap-2 transition-colors duration-300"
         >
           <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" aria-hidden="true" />
           <span>{toastMessage}</span>

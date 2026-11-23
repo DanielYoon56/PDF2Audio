@@ -29,12 +29,12 @@ export function Footer({ onAdminExportCsv }: FooterProps) {
   };
 
   return (
-    <footer className="w-full bg-white border-t border-slate-200 mt-auto">
-      <div className="max-w-[1360px] mx-auto px-4 sm:px-6 lg:px-8 py-5 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-400">
+    <footer className="w-full bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 mt-auto transition-colors duration-300">
+      <div className="max-w-[1360px] mx-auto px-4 sm:px-6 lg:px-8 py-5 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-400 dark:text-slate-500">
         <button
           type="button"
           onClick={handleCopyrightClick}
-          className="text-xs text-slate-400 hover:text-slate-500 transition-colors select-none cursor-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 rounded"
+          className="text-xs text-slate-400 dark:text-slate-500 hover:text-slate-500 dark:hover:text-slate-400 transition-colors select-none cursor-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 dark:focus-visible:ring-slate-700 rounded"
         >
           © 2026 PaperAudio Demo
         </button>

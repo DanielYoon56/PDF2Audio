@@ -1,8 +1,15 @@
+# API 키 및 환경 변수 (절대 업로드 금지)
+.env
+.env.local
+.env.*.local
+
+# 의존성 패키지 및 빌드 결과물
 node_modules/
-build/
 dist/
-coverage/
+build/
+
+# 로그 및 OS 파일
+npm-debug.log*
 .DS_Store
-*.log
-.env*
-!.env.example
+Thumbs.db
+.vscode/
