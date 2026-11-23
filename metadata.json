@@ -2,5 +2,7 @@
   "name": "PaperAudio — PDF 논문·리포트 오디오북 변환 데모",
   "description": "PDF 논문과 리포트를 Gemini AI로 자연스러운 한국어 낭독 대본으로 변환하고 즉시 들어볼 수 있는 오디오북 데모 웹앱입니다.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
