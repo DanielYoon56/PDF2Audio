@@ -3,6 +3,8 @@ import {
   AlertCircle,
   Check,
   ChevronDown,
+  Download,
+  Loader2,
   Pause,
   Play,
   SkipBack,
@@ -18,12 +20,18 @@ interface AudioPlayerBarProps {
   player: SpeechPlayerState;
   totalParagraphs: number;
   disabled?: boolean;
+  isExportingAudio?: boolean;
+  audioExportStatus?: string | null;
+  onDownloadAudio?: () => void;
 }
 
 export function AudioPlayerBar({
   player,
   totalParagraphs,
   disabled = false,
+  isExportingAudio = false,
+  audioExportStatus = null,
+  onDownloadAudio,
 }: AudioPlayerBarProps) {
   const isDisabled = disabled || !player.isSupported || totalParagraphs === 0;
   const currentDisplayIndex =
@@ -161,8 +169,31 @@ export function AudioPlayerBar({
             </span>
           </div>
 
-          {/* Custom Voice Dropdown Menu */}
-          <div ref={voiceMenuRef} className="relative min-w-0">
+          {/* Audio Download & Custom Voice Dropdown Menu */}
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            {onDownloadAudio && (
+              <button
+                type="button"
+                onClick={onDownloadAudio}
+                disabled={disabled || totalParagraphs === 0 || isExportingAudio}
+                title={audioExportStatus || '변환된 대본을 AI 음성 파일(MP3/WAV)로 다운로드'}
+                className="h-9 px-3 rounded-lg border border-blue-200 dark:border-blue-800/80 bg-blue-50/80 dark:bg-blue-950/40 hover:bg-blue-100/80 dark:hover:bg-blue-900/50 text-xs font-semibold text-blue-700 dark:text-blue-300 disabled:opacity-45 disabled:cursor-not-allowed inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+              >
+                {isExportingAudio ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" aria-hidden="true" />
+                    <span>{audioExportStatus || '음성 생성 중...'}</span>
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                    <span>음성 저장</span>
+                  </>
+                )}
+              </button>
+            )}
+
+            <div ref={voiceMenuRef} className="relative min-w-0">
             <button
               type="button"
               disabled={isDisabled || player.voices.length === 0}
@@ -231,6 +262,7 @@ export function AudioPlayerBar({
                 })}
               </div>
             )}
+            </div>
           </div>
         </div>
 

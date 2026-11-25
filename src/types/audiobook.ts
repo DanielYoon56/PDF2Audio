@@ -52,6 +52,7 @@ export interface GeneratedScriptResult {
   fallbackUsed?: boolean;
   fallbackReason?: string;
   splitProgress?: PdfSplitProgress;
+  integrityVerified?: boolean;
 }
 
 export interface UsageHistoryItem {

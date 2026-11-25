@@ -21,6 +21,7 @@ import type {
   WaitlistFormValues,
 } from './types/audiobook';
 import { estimateReadingMinutes, fileToBase64 } from './utils/fileHelpers';
+import { exportScriptToAudio } from './utils/audioExport';
 import {
   extractPdfPageChunkBase64,
   inspectPdfMetadata,
@@ -47,6 +48,7 @@ interface GenerateApiResponse {
   providerUsed?: 'gemini' | 'openrouter';
   fallbackUsed?: boolean;
   fallbackReason?: string;
+  integrityVerified?: boolean;
   error?: string;
 }
 
@@ -81,7 +83,12 @@ export default function App() {
   const [mode, setMode] = useState<ConversionMode>('ko-translate');
   const [provider, setProvider] = useState<LlmProviderPreference>('auto');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [generatingStatus, setGeneratingStatus] = useState<string | null>(null);
+  const [generatingChars, setGeneratingChars] = useState(0);
   const [isConvertingNextChunk, setIsConvertingNextChunk] = useState(false);
+  const [isExportingAudio, setIsExportingAudio] = useState(false);
+  const [audioExportStatus, setAudioExportStatus] = useState<string | null>(null);
+  const [regeneratingIndices, setRegeneratingIndices] = useState<number[]>([]);
   const [apiError, setApiError] = useState<string | null>(null);
   const [result, setResult] = useState<GeneratedScriptResult | null>(null);
   const [isWaitlistOpen, setIsWaitlistOpen] = useState(false);
@@ -94,6 +101,9 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const inspectTokenRef = useRef(0);
+  const lastPdfBase64Ref = useRef<{ fileName: string; base64: string } | null>(
+    null
+  );
 
   useEffect(() => {
     const root = document.documentElement;
@@ -189,13 +199,134 @@ export default function App() {
     });
   };
 
+  const requestGenerateScriptStream = async (
+    payload: {
+      pdfBase64: string;
+      fileName: string;
+      mode: ConversionMode;
+      provider: LlmProviderPreference;
+      pageRange?: { startPage: number; endPage: number; totalPages: number };
+    },
+    onStatus?: (message: string) => void,
+    onProgress?: (chars: number, providerLabel?: string) => void
+  ): Promise<GenerateApiResponse> => {
+    const response = await fetch('/api/generate-script', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream, application/json',
+      },
+      body: JSON.stringify({
+        ...payload,
+        stream: true,
+      }),
+    });
+
+    const contentType = response.headers.get('content-type') || '';
+
+    if (!response.ok || !contentType.includes('text/event-stream')) {
+      let data: GenerateApiResponse = {};
+      try {
+        data = (await response.json()) as GenerateApiResponse;
+      } catch {
+        // Non-JSON response fallback
+      }
+      if (!response.ok) {
+        throw new Error(
+          data.error ||
+            `서버 응답 오류가 발생했습니다. (HTTP ${response.status})`
+        );
+      }
+      return data;
+    }
+
+    if (!response.body) {
+      throw new Error('서버 스트림 응답을 읽을 수 없습니다.');
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    let finalResult: GenerateApiResponse | null = null;
+
+    const handleBlock = (block: string) => {
+      const lines = block.split(/\r?\n/);
+      let eventName = 'message';
+      const dataLines: string[] = [];
+
+      for (const line of lines) {
+        if (!line || line.startsWith(':')) continue;
+        if (line.startsWith('event:')) {
+          eventName = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          dataLines.push(line.slice(5).trim());
+        }
+      }
+
+      if (dataLines.length === 0) return;
+      const dataStr = dataLines.join('\n');
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(dataStr) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+
+      if (eventName === 'status' && typeof parsed.message === 'string') {
+        onStatus?.(parsed.message);
+      } else if (eventName === 'progress') {
+        const chars = Number(parsed.chars) || 0;
+        const providerLabel =
+          typeof parsed.provider === 'string' ? parsed.provider : undefined;
+        onProgress?.(chars, providerLabel);
+      } else if (eventName === 'error') {
+        const msg =
+          typeof parsed.error === 'string'
+            ? parsed.error
+            : '대본 생성 중 오류가 발생했습니다.';
+        throw new Error(msg);
+      } else if (eventName === 'done') {
+        finalResult = parsed as unknown as GenerateApiResponse;
+      }
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      buffer = blocks.pop() ?? '';
+      for (const block of blocks) {
+        if (block.trim()) {
+          handleBlock(block);
+        }
+      }
+    }
+
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      handleBlock(buffer);
+    }
+
+    if (!finalResult) {
+      throw new Error(
+        '서버 연결이 완료되기 전에 종료되었습니다. 잠시 후 다시 시도해 주세요.'
+      );
+    }
+
+    return finalResult;
+  };
+
   const handleGenerate = async () => {
     if (!selectedFile || isGenerating) return;
 
     player.stop();
     setApiError(null);
     setFileError(null);
+    setRegeneratingIndices([]);
     setIsGenerating(true);
+    setGeneratingStatus('PDF 문서를 준비하고 있습니다...');
+    setGeneratingChars(0);
 
     try {
       let pdfBase64: string;
@@ -229,31 +360,27 @@ export default function App() {
         pdfBase64 = await fileToBase64(selectedFile);
       }
 
-      const response = await fetch('/api/generate-script', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      lastPdfBase64Ref.current = {
+        fileName: selectedFile.name,
+        base64: pdfBase64,
+      };
+
+      const data = await requestGenerateScriptStream(
+        {
           pdfBase64,
           fileName: selectedFile.name,
           mode,
           provider,
           pageRange,
-        }),
-      });
-
-      let data: GenerateApiResponse = {};
-      try {
-        data = (await response.json()) as GenerateApiResponse;
-      } catch {
-        // Non-JSON response fallback
-      }
-
-      if (!response.ok) {
-        throw new Error(
-          data.error ||
-            `서버 응답 오류가 발생했습니다. (HTTP ${response.status})`
-        );
-      }
+        },
+        (msg) => setGeneratingStatus(msg),
+        (chars, providerLabel) => {
+          setGeneratingChars(chars);
+          if (providerLabel) {
+            setGeneratingStatus(`${providerLabel}에서 대본을 실시간 생성 중입니다...`);
+          }
+        }
+      );
 
       const paragraphs =
         Array.isArray(data.paragraphs) && data.paragraphs.length > 0
@@ -287,6 +414,7 @@ export default function App() {
         fallbackUsed: Boolean(data.fallbackUsed),
         fallbackReason: data.fallbackReason,
         splitProgress,
+        integrityVerified: data.integrityVerified,
       });
 
       const estimatedMinutes = estimateReadingMinutes(
@@ -318,6 +446,8 @@ export default function App() {
       setApiError(message);
     } finally {
       setIsGenerating(false);
+      setGeneratingStatus(null);
+      setGeneratingChars(0);
     }
   };
 
@@ -347,35 +477,17 @@ export default function App() {
         endPage
       );
 
-      const response = await fetch('/api/generate-script', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          pdfBase64: extraction.base64,
-          fileName: selectedFile.name,
-          mode: result.mode,
-          provider,
-          pageRange: {
-            startPage: extraction.startPage,
-            endPage: extraction.endPage,
-            totalPages: extraction.totalPages ?? totalPages,
-          },
-        }),
+      const data = await requestGenerateScriptStream({
+        pdfBase64: extraction.base64,
+        fileName: selectedFile.name,
+        mode: result.mode,
+        provider,
+        pageRange: {
+          startPage: extraction.startPage,
+          endPage: extraction.endPage,
+          totalPages: extraction.totalPages ?? totalPages,
+        },
       });
-
-      let data: GenerateApiResponse = {};
-      try {
-        data = (await response.json()) as GenerateApiResponse;
-      } catch {
-        // Non-JSON response fallback
-      }
-
-      if (!response.ok) {
-        throw new Error(
-          data.error ||
-            `다음 구간 변환 중 서버 오류가 발생했습니다. (HTTP ${response.status})`
-        );
-      }
 
       const nextParagraphs =
         Array.isArray(data.paragraphs) && data.paragraphs.length > 0
@@ -412,6 +524,123 @@ export default function App() {
       setApiError(message);
     } finally {
       setIsConvertingNextChunk(false);
+    }
+  };
+
+  const handleDownloadAudio = async () => {
+    if (!result || isGenerating || isExportingAudio) return;
+
+    setApiError(null);
+    setIsExportingAudio(true);
+    setAudioExportStatus('음성 생성 준비 중...');
+
+    try {
+      const exported = await exportScriptToAudio({
+        script: result.script,
+        fileName: result.fileName,
+        language: result.detectedLanguage,
+        onProgress: (progress) => {
+          if (progress.currentChunk && progress.totalChunks) {
+            setAudioExportStatus(
+              `음성 생성 (${progress.currentChunk}/${progress.totalChunks})`
+            );
+          } else {
+            setAudioExportStatus(progress.message);
+          }
+        },
+      });
+      showToast(
+        `오디오북 음성 파일(.${exported.extension}) 다운로드를 시작했습니다. (${exported.providerUsed})`
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : '음성 파일 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.';
+      setApiError(message);
+    } finally {
+      setIsExportingAudio(false);
+      setAudioExportStatus(null);
+    }
+  };
+
+  const handleRegenerateParagraph = async (paragraphIndex: number) => {
+    if (!result) return;
+    const targetParagraph = result.paragraphs[paragraphIndex];
+    if (!targetParagraph) return;
+    if (regeneratingIndices.includes(paragraphIndex)) return;
+
+    setApiError(null);
+    setRegeneratingIndices((prev) =>
+      prev.includes(paragraphIndex) ? prev : [...prev, paragraphIndex]
+    );
+
+    try {
+      const cachedPdf =
+        lastPdfBase64Ref.current &&
+        lastPdfBase64Ref.current.fileName === result.fileName
+          ? lastPdfBase64Ref.current.base64
+          : undefined;
+
+      const response = await fetch('/api/regenerate-paragraph', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          paragraph: targetParagraph,
+          paragraphIndex,
+          previousParagraph:
+            paragraphIndex > 0
+              ? result.paragraphs[paragraphIndex - 1]
+              : undefined,
+          nextParagraph:
+            paragraphIndex < result.paragraphs.length - 1
+              ? result.paragraphs[paragraphIndex + 1]
+              : undefined,
+          mode: result.mode,
+          language: result.detectedLanguage,
+          provider,
+          fileName: result.fileName,
+          pdfBase64: cachedPdf,
+        }),
+      });
+
+      const data = (await response.json().catch(() => ({}))) as {
+        repairedParagraph?: string;
+        error?: string;
+      };
+
+      if (!response.ok || !data.repairedParagraph) {
+        throw new Error(
+          data.error ||
+            '선택한 문단을 다시 생성하는 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.'
+        );
+      }
+
+      const repaired = data.repairedParagraph.trim();
+      setResult((prev) => {
+        if (!prev || !prev.paragraphs[paragraphIndex]) return prev;
+        const nextParagraphs = [...prev.paragraphs];
+        nextParagraphs[paragraphIndex] = repaired;
+        return {
+          ...prev,
+          paragraphs: nextParagraphs,
+          script: nextParagraphs.join('\n\n'),
+        };
+      });
+
+      showToast(
+        `${paragraphIndex + 1}번 문단을 완전한 문장으로 다시 생성했습니다.`
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : '문단 다시 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.';
+      setApiError(message);
+    } finally {
+      setRegeneratingIndices((prev) =>
+        prev.filter((idx) => idx !== paragraphIndex)
+      );
     }
   };
 
@@ -460,7 +689,7 @@ export default function App() {
               />
               <div>
                 <p className="font-semibold text-red-900 dark:text-red-100">
-                  대본 생성에 실패했습니다
+                  요청 처리에 실패했습니다
                 </p>
                 <p className="mt-0.5 text-xs sm:text-sm text-red-700 dark:text-red-300 leading-relaxed">
                   {apiError}
@@ -505,6 +734,9 @@ export default function App() {
               player={player}
               totalParagraphs={result?.paragraphs.length ?? 0}
               disabled={isGenerating || !result}
+              isExportingAudio={isExportingAudio}
+              audioExportStatus={audioExportStatus}
+              onDownloadAudio={handleDownloadAudio}
             />
 
             {result && !isGenerating && (
@@ -514,7 +746,11 @@ export default function App() {
             <ScriptViewer
               result={result}
               isGenerating={isGenerating}
+              generatingStatus={generatingStatus}
+              generatingChars={generatingChars}
               isConvertingNextChunk={isConvertingNextChunk}
+              isExportingAudio={isExportingAudio}
+              audioExportStatus={audioExportStatus}
               canContinueChunk={Boolean(
                 selectedFile && result && selectedFile.name === result.fileName
               )}
@@ -524,6 +760,9 @@ export default function App() {
               onSelectParagraph={player.playFromIndex}
               onTriggerUpload={() => fileInputRef.current?.click()}
               onContinueNextChunk={handleContinueNextChunk}
+              onDownloadAudio={handleDownloadAudio}
+              regeneratingIndices={regeneratingIndices}
+              onRegenerateParagraph={handleRegenerateParagraph}
             />
           </section>
         </div>

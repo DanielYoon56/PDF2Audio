@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react';
 import {
+  AlertTriangle,
   ArrowRight,
   Check,
   ChevronDown,
@@ -17,10 +18,12 @@ import {
   Loader2,
   Play,
   Quote,
+  RotateCcw,
   Search,
   StickyNote,
   Trash2,
   Type as TypeIcon,
+  Volume2,
   X,
 } from 'lucide-react';
 import type {
@@ -37,7 +40,11 @@ import { exportScriptToPdf } from '../utils/pdfExport';
 interface ScriptViewerProps {
   result: GeneratedScriptResult | null;
   isGenerating: boolean;
+  generatingStatus?: string | null;
+  generatingChars?: number;
   isConvertingNextChunk: boolean;
+  isExportingAudio?: boolean;
+  audioExportStatus?: string | null;
   canContinueChunk: boolean;
   activeIndex: number | null;
   playbackStatus: PlaybackStatus;
@@ -45,6 +52,17 @@ interface ScriptViewerProps {
   onSelectParagraph: (index: number) => void;
   onTriggerUpload: () => void;
   onContinueNextChunk: () => void;
+  onDownloadAudio?: () => void;
+  regeneratingIndices?: number[];
+  onRegenerateParagraph?: (index: number) => void;
+}
+
+const NORMAL_ENDING_REGEX = /[.!?。！？…]["'”’)\]」』》】]*$/;
+
+function isAbnormalParagraphEnding(paragraph: string): boolean {
+  const trimmed = paragraph.trim();
+  if (!trimmed) return false;
+  return !NORMAL_ENDING_REGEX.test(trimmed);
 }
 
 interface SearchMatch {
@@ -233,7 +251,11 @@ function buildAnnotatedSegments(
 export function ScriptViewer({
   result,
   isGenerating,
+  generatingStatus,
+  generatingChars = 0,
   isConvertingNextChunk,
+  isExportingAudio = false,
+  audioExportStatus = null,
   canContinueChunk,
   activeIndex,
   playbackStatus,
@@ -241,6 +263,9 @@ export function ScriptViewer({
   onSelectParagraph,
   onTriggerUpload,
   onContinueNextChunk,
+  onDownloadAudio,
+  regeneratingIndices = [],
+  onRegenerateParagraph,
 }: ScriptViewerProps) {
   const [copied, setCopied] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
@@ -635,22 +660,56 @@ export function ScriptViewer({
     return map;
   }, [searchMatches]);
 
+  const incompleteParagraphIndices = useMemo(() => {
+    if (!result) return [];
+    const indices: number[] = [];
+    result.paragraphs.forEach((paragraph, idx) => {
+      if (isAbnormalParagraphEnding(paragraph)) {
+        indices.push(idx);
+      }
+    });
+    return indices;
+  }, [result]);
+
+  const scrollToParagraph = (paragraphIndex: number) => {
+    if (showAnnotatedOnly && !annotations[paragraphIndex]) {
+      setShowAnnotatedOnly(false);
+    }
+    window.requestAnimationFrame(() => {
+      const card = paragraphCardRefs.current[paragraphIndex];
+      if (card) {
+        card.scrollIntoView({
+          behavior: 'smooth',
+          block: 'center',
+          inline: 'nearest',
+        });
+      }
+    });
+  };
+
   if (isGenerating) {
     return (
       <div className="p-6 sm:p-8 flex flex-col gap-6 transition-colors duration-300">
-        <div className="flex items-center gap-3 pb-5 border-b border-slate-100 dark:border-slate-800">
-          <Loader2
-            className="w-5 h-5 text-blue-600 dark:text-blue-400 animate-spin shrink-0"
-            aria-hidden="true"
-          />
-          <div>
-            <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              PDF 분석 및 낭독 대본 생성 중...
-            </p>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              2단 레이아웃 순서 정리, 인용 제거 및 구어체 변환을 진행하고 있습니다.
-            </p>
+        <div className="flex items-center justify-between gap-3 pb-5 border-b border-slate-100 dark:border-slate-800">
+          <div className="flex items-center gap-3 min-w-0">
+            <Loader2
+              className="w-5 h-5 text-blue-600 dark:text-blue-400 animate-spin shrink-0"
+              aria-hidden="true"
+            />
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                {generatingStatus || 'PDF 분석 및 낭독 대본 생성 중...'}
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                2단 레이아웃 순서 정리, 인용 제거 및 구어체 변환을 실시간으로 진행하고 있습니다.
+              </p>
+            </div>
           </div>
+          {generatingChars > 0 && (
+            <span className="shrink-0 font-mono tabular-nums text-xs font-semibold text-blue-600 dark:text-blue-400">
+              {generatingChars.toLocaleString('ko-KR')}자 수신
+            </span>
+          )}
         </div>
 
         <div className="space-y-6 animate-pulse" aria-hidden="true">
@@ -805,6 +864,38 @@ export function ScriptViewer({
         </div>
       )}
 
+      {/* Incomplete Paragraph Detection Alert Banner */}
+      {incompleteParagraphIndices.length > 0 && (
+        <div
+          role="alert"
+          className="px-4 sm:px-6 py-2.5 bg-amber-50/90 dark:bg-amber-950/35 border-b border-amber-200/85 dark:border-amber-800/60 flex flex-wrap items-center justify-between gap-2.5 text-xs"
+        >
+          <div className="flex items-center gap-2 min-w-0 text-amber-900 dark:text-amber-200">
+            <AlertTriangle
+              className="w-3.5 h-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+              aria-hidden="true"
+            />
+            <span>
+              마침표로 끝나지 않은 불완전한 문단{' '}
+              <strong className="font-mono tabular-nums font-semibold">
+                {incompleteParagraphIndices.length}개
+              </strong>
+              가 감지되었습니다. 해당 문단만 다시 생성해 매끄럽게 마무리할 수 있습니다.
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => scrollToParagraph(incompleteParagraphIndices[0])}
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-amber-300 dark:border-amber-700 bg-white dark:bg-amber-950/60 hover:bg-amber-100/70 dark:hover:bg-amber-900/50 text-amber-900 dark:text-amber-100 font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+          >
+            <span>
+              문단 #{String(incompleteParagraphIndices[0] + 1).padStart(2, '0')}로 이동
+            </span>
+            <ArrowRight className="w-3 h-3" aria-hidden="true" />
+          </button>
+        </div>
+      )}
+
       {/* Document Toolbar */}
       <div className="px-4 sm:px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 transition-colors duration-300">
         <div className="min-w-0">
@@ -878,6 +969,28 @@ export function ScriptViewer({
             )}
             <span>PDF 저장</span>
           </button>
+
+          {onDownloadAudio && (
+            <button
+              type="button"
+              onClick={onDownloadAudio}
+              disabled={isExportingAudio}
+              title={audioExportStatus || '변환된 대본을 음성 파일(MP3/WAV)로 다운로드'}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/90 dark:bg-blue-950/45 hover:bg-blue-100/90 dark:hover:bg-blue-900/50 disabled:opacity-50 text-xs font-semibold text-blue-700 dark:text-blue-300 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+            >
+              {isExportingAudio ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" aria-hidden="true" />
+                  <span>{audioExportStatus || '음성 생성 중...'}</span>
+                </>
+              ) : (
+                <>
+                  <Volume2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span>음성 다운로드</span>
+                </>
+              )}
+            </button>
+          )}
         </div>
       </div>
 
@@ -981,6 +1094,8 @@ export function ScriptViewer({
               const hasMemo = Boolean(annotation?.memo);
               const isMemoOpen = openMemoIndex === index;
               const paraMatches = matchesByParagraph.get(index) ?? [];
+              const isIncompleteEnding = isAbnormalParagraphEnding(paragraph);
+              const isRegeneratingThis = regeneratingIndices.includes(index);
 
               const segments = buildAnnotatedSegments(
                 paragraph,
@@ -991,6 +1106,8 @@ export function ScriptViewer({
 
               const cardSurfaceClass = isActive
                 ? 'bg-blue-50/85 dark:bg-blue-950/45 ring-1 ring-blue-200 dark:ring-blue-500/40 text-slate-950 dark:text-slate-50'
+                : isIncompleteEnding
+                ? 'bg-amber-50/65 dark:bg-amber-950/20 ring-1 ring-amber-300/80 dark:ring-amber-700/55 text-slate-900 dark:text-slate-100'
                 : paragraphHighlight
                 ? `${getSwatch(paragraphHighlight).cardClass} text-slate-900 dark:text-slate-100`
                 : 'bg-transparent hover:bg-slate-50/90 dark:hover:bg-slate-800/50 text-slate-800 dark:text-slate-200';
@@ -1004,8 +1121,8 @@ export function ScriptViewer({
                   aria-current={isActive ? 'true' : undefined}
                   className={`group relative rounded-lg pl-4 pr-3.5 py-3.5 transition-colors duration-200 ${cardSurfaceClass}`}
                 >
-                  {/* Animated left vertical progress bar for active speaking paragraph */}
-                  {isActive && (
+                  {/* Animated left vertical progress bar for active speaking paragraph or amber bar for incomplete */}
+                  {isActive ? (
                     <span
                       aria-hidden="true"
                       className={`absolute left-1.5 top-2.5 bottom-2.5 w-[3.5px] rounded-full origin-center transition-all duration-300 ${
@@ -1016,7 +1133,12 @@ export function ScriptViewer({
                           : 'bg-blue-500/60'
                       }`}
                     />
-                  )}
+                  ) : isIncompleteEnding ? (
+                    <span
+                      aria-hidden="true"
+                      className="absolute left-1.5 top-2.5 bottom-2.5 w-[3.5px] rounded-full bg-amber-400 dark:bg-amber-500"
+                    />
+                  ) : null}
 
                   <div className="flex items-start gap-3">
                     <button
@@ -1113,6 +1235,50 @@ export function ScriptViewer({
                           );
                         })}
                       </p>
+
+                      {/* Abnormal ending detection notice & targeted Regenerate action */}
+                      {isIncompleteEnding && (
+                        <div className="mt-2.5 rounded-md border border-amber-200/90 dark:border-amber-800/70 bg-white/90 dark:bg-slate-900/80 px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+                          <div className="flex items-center gap-1.5 text-amber-800 dark:text-amber-200 min-w-0">
+                            <AlertTriangle
+                              className="w-3.5 h-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+                              aria-hidden="true"
+                            />
+                            <span>
+                              문단이 마침표로 끝나지 않았습니다. 문장이 도중에 끊긴 경우 이 문단만 다시 생성해 보세요.
+                            </span>
+                          </div>
+                          {onRegenerateParagraph && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onRegenerateParagraph(index);
+                              }}
+                              disabled={isRegeneratingThis}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-600 hover:bg-amber-700 disabled:bg-amber-400 dark:bg-amber-500 dark:hover:bg-amber-400 dark:text-slate-950 text-white text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+                            >
+                              {isRegeneratingThis ? (
+                                <>
+                                  <Loader2
+                                    className="w-3 h-3 animate-spin"
+                                    aria-hidden="true"
+                                  />
+                                  <span>다시 생성 중...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <RotateCcw
+                                    className="w-3 h-3"
+                                    aria-hidden="true"
+                                  />
+                                  <span>다시 생성</span>
+                                </>
+                              )}
+                            </button>
+                          )}
+                        </div>
+                      )}
 
                       {/* Quiet paragraph highlight & memo actions */}
                       <div
