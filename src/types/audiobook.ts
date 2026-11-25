@@ -1,6 +1,6 @@
-export type ConversionMode = 'ko-translate' | 'original-clean';
+export type ConversionMode = 'ko-translate' | 'ko-summary' | 'original-clean';
 
-export type PlaybackRate = 0.8 | 1.0 | 1.2 | 1.5;
+export type LlmProviderPreference = 'auto' | 'gemini' | 'openrouter';
 
 export type PlaybackStatus = 'idle' | 'playing' | 'paused';
 
@@ -25,13 +25,44 @@ export interface ParagraphAnnotation {
 
 export type DocumentAnnotations = Record<number, ParagraphAnnotation>;
 
+export interface PdfFileMetadata {
+  totalPages: number | null;
+  isLargeFile: boolean;
+  willAutoSplit: boolean;
+  chunkSize: number;
+}
+
+export interface PdfSplitProgress {
+  isAutoSplit: boolean;
+  totalPages: number;
+  convertedUpToPage: number;
+  chunkSize: number;
+}
+
 export interface GeneratedScriptResult {
   script: string;
   paragraphs: string[];
   detectedLanguage: DetectedLanguage;
+  category: string;
   fileName: string;
   mode: ConversionMode;
   generatedAt: string;
+  providerUsed: 'gemini' | 'openrouter';
+  model?: string;
+  fallbackUsed?: boolean;
+  fallbackReason?: string;
+  splitProgress?: PdfSplitProgress;
+}
+
+export interface UsageHistoryItem {
+  id: string;
+  fileName: string;
+  category: string;
+  mode: ConversionMode;
+  estimatedMinutes: number;
+  charCount: number;
+  paragraphCount: number;
+  convertedAt: string;
 }
 
 export interface WaitlistFormValues {

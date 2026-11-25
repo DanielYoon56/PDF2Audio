@@ -5,18 +5,34 @@ import { UploadPanel } from './components/UploadPanel';
 import { AudioPlayerBar } from './components/AudioPlayerBar';
 import { EarlyBirdBanner } from './components/EarlyBirdBanner';
 import { ScriptViewer } from './components/ScriptViewer';
+import { FaqSection } from './components/FaqSection';
 import { WaitlistModal } from './components/WaitlistModal';
+import { UsageDashboardModal } from './components/UsageDashboardModal';
 import { Footer } from './components/Footer';
 import { useSpeechPlayer } from './hooks/useSpeechPlayer';
 import type {
   ConversionMode,
   DetectedLanguage,
   GeneratedScriptResult,
+  LlmProviderPreference,
+  PdfFileMetadata,
   ThemeMode,
+  UsageHistoryItem,
   WaitlistFormValues,
 } from './types/audiobook';
-import { fileToBase64 } from './utils/fileHelpers';
+import { estimateReadingMinutes, fileToBase64 } from './utils/fileHelpers';
+import {
+  extractPdfPageChunkBase64,
+  inspectPdfMetadata,
+  LARGE_PDF_THRESHOLD_BYTES,
+  SPLIT_CHUNK_PAGES,
+} from './utils/pdfSplitter';
 import { exportWaitlistCsv, submitWaitlistEntry } from './utils/waitlistStorage';
+import {
+  clearUsageHistory,
+  loadUsageHistory,
+  recordUsageEntry,
+} from './utils/usageStorage';
 
 // 외부 폼/웹훅 연동 URL (비워두어도 localStorage에 안전하게 저장됩니다)
 const WEBHOOK_URL = 'https://formspree.io/f/xgakpoyg';
@@ -26,6 +42,11 @@ interface GenerateApiResponse {
   script?: string;
   paragraphs?: string[];
   detectedLanguage?: DetectedLanguage;
+  category?: string;
+  model?: string;
+  providerUsed?: 'gemini' | 'openrouter';
+  fallbackUsed?: boolean;
+  fallbackReason?: string;
   error?: string;
 }
 
@@ -40,19 +61,39 @@ function getInitialTheme(): ThemeMode {
   return document.documentElement.classList.contains('dark') ? 'dark' : 'light';
 }
 
+function isEditableElement(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return (
+    tagName === 'input' ||
+    tagName === 'textarea' ||
+    tagName === 'select' ||
+    target.isContentEditable
+  );
+}
+
 export default function App() {
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [fileMetadata, setFileMetadata] = useState<PdfFileMetadata | null>(null);
+  const [isInspectingPdf, setIsInspectingPdf] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
   const [mode, setMode] = useState<ConversionMode>('ko-translate');
+  const [provider, setProvider] = useState<LlmProviderPreference>('auto');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isConvertingNextChunk, setIsConvertingNextChunk] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
   const [result, setResult] = useState<GeneratedScriptResult | null>(null);
   const [isWaitlistOpen, setIsWaitlistOpen] = useState(false);
+  const [isUsageDashboardOpen, setIsUsageDashboardOpen] = useState(false);
+  const [usageHistory, setUsageHistory] = useState<UsageHistoryItem[]>(() =>
+    typeof window !== 'undefined' ? loadUsageHistory() : []
+  );
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const toastTimerRef = useRef<number | null>(null);
+  const inspectTokenRef = useRef(0);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -69,12 +110,52 @@ export default function App() {
   };
 
   const targetLanguage: DetectedLanguage =
-    result?.detectedLanguage ?? (mode === 'ko-translate' ? 'ko-KR' : 'en-US');
+    result?.detectedLanguage ??
+    (mode === 'original-clean' ? 'en-US' : 'ko-KR');
 
   const player = useSpeechPlayer({
     paragraphs: result?.paragraphs ?? [],
     targetLanguage,
   });
+
+  // Global keyboard shortcuts for audio playback (Space, ArrowLeft/ArrowRight, Esc)
+  useEffect(() => {
+    if (!result || result.paragraphs.length === 0) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (isWaitlistOpen || isUsageDashboardOpen) return;
+      if (isEditableElement(event.target)) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+      if (event.code === 'Space') {
+        event.preventDefault();
+        player.togglePlayPause();
+      } else if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        player.skipPrev();
+      } else if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        player.skipNext();
+      } else if (event.key === 'Escape') {
+        if (player.status !== 'idle') {
+          event.preventDefault();
+          player.stop();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    result,
+    isWaitlistOpen,
+    isUsageDashboardOpen,
+    player.togglePlayPause,
+    player.skipPrev,
+    player.skipNext,
+    player.stop,
+    player.status,
+  ]);
 
   const showToast = (message: string) => {
     setToastMessage(message);
@@ -88,11 +169,24 @@ export default function App() {
   };
 
   const handleFileSelect = (file: File | null, validationError?: string | null) => {
+    const token = ++inspectTokenRef.current;
     setSelectedFile(file);
     setFileError(validationError ?? null);
-    if (file) {
-      setApiError(null);
+    setFileMetadata(null);
+
+    if (!file) {
+      setIsInspectingPdf(false);
+      return;
     }
+
+    setApiError(null);
+    setIsInspectingPdf(true);
+
+    void inspectPdfMetadata(file).then((meta) => {
+      if (inspectTokenRef.current !== token) return;
+      setFileMetadata(meta);
+      setIsInspectingPdf(false);
+    });
   };
 
   const handleGenerate = async () => {
@@ -104,7 +198,37 @@ export default function App() {
     setIsGenerating(true);
 
     try {
-      const pdfBase64 = await fileToBase64(selectedFile);
+      let pdfBase64: string;
+      let pageRange:
+        | { startPage: number; endPage: number; totalPages: number }
+        | undefined;
+      let splitProgress: GeneratedScriptResult['splitProgress'];
+
+      if (selectedFile.size >= LARGE_PDF_THRESHOLD_BYTES) {
+        const extraction = await extractPdfPageChunkBase64(
+          selectedFile,
+          1,
+          SPLIT_CHUNK_PAGES
+        );
+        pdfBase64 = extraction.base64;
+
+        if (extraction.wasSplit && extraction.totalPages) {
+          pageRange = {
+            startPage: extraction.startPage,
+            endPage: extraction.endPage,
+            totalPages: extraction.totalPages,
+          };
+          splitProgress = {
+            isAutoSplit: true,
+            totalPages: extraction.totalPages,
+            convertedUpToPage: extraction.endPage,
+            chunkSize: SPLIT_CHUNK_PAGES,
+          };
+        }
+      } else {
+        pdfBase64 = await fileToBase64(selectedFile);
+      }
+
       const response = await fetch('/api/generate-script', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -112,6 +236,8 @@ export default function App() {
           pdfBase64,
           fileName: selectedFile.name,
           mode,
+          provider,
+          pageRange,
         }),
       });
 
@@ -143,15 +269,47 @@ export default function App() {
         );
       }
 
+      const scriptText = paragraphs.join('\n\n');
+      const detectedLang: DetectedLanguage =
+        data.detectedLanguage === 'en-US' ? 'en-US' : 'ko-KR';
+      const category = data.category || '일반 논문 · 리포트';
+
       setResult({
-        script: paragraphs.join('\n\n'),
+        script: scriptText,
         paragraphs,
-        detectedLanguage:
-          data.detectedLanguage === 'en-US' ? 'en-US' : 'ko-KR',
+        detectedLanguage: detectedLang,
+        category,
         fileName: selectedFile.name,
         mode,
         generatedAt: new Date().toISOString(),
+        providerUsed: data.providerUsed === 'openrouter' ? 'openrouter' : 'gemini',
+        model: data.model,
+        fallbackUsed: Boolean(data.fallbackUsed),
+        fallbackReason: data.fallbackReason,
+        splitProgress,
       });
+
+      const estimatedMinutes = estimateReadingMinutes(
+        scriptText,
+        detectedLang === 'ko-KR'
+      );
+      const updatedHistory = recordUsageEntry({
+        fileName: selectedFile.name,
+        category,
+        mode,
+        estimatedMinutes,
+        charCount: scriptText.length,
+        paragraphCount: paragraphs.length,
+      });
+      setUsageHistory(updatedHistory);
+
+      if (splitProgress?.isAutoSplit) {
+        showToast(
+          `대용량 자동 분할: 첫 ${splitProgress.convertedUpToPage}페이지(전체 ${splitProgress.totalPages}p 중) 변환 완료! 바로 재생해 보세요.`
+        );
+      } else if (data.fallbackUsed) {
+        showToast('Gemini 여유 부족으로 OpenRouter(Claude)로 자동 전환되었습니다.');
+      }
     } catch (error) {
       const message =
         error instanceof Error
@@ -160,6 +318,100 @@ export default function App() {
       setApiError(message);
     } finally {
       setIsGenerating(false);
+    }
+  };
+
+  const handleContinueNextChunk = async () => {
+    if (
+      !selectedFile ||
+      !result?.splitProgress ||
+      isGenerating ||
+      isConvertingNextChunk
+    ) {
+      return;
+    }
+
+    const { totalPages, convertedUpToPage, chunkSize } = result.splitProgress;
+    if (convertedUpToPage >= totalPages) return;
+
+    const startPage = convertedUpToPage + 1;
+    const endPage = Math.min(totalPages, convertedUpToPage + chunkSize);
+
+    setApiError(null);
+    setIsConvertingNextChunk(true);
+
+    try {
+      const extraction = await extractPdfPageChunkBase64(
+        selectedFile,
+        startPage,
+        endPage
+      );
+
+      const response = await fetch('/api/generate-script', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pdfBase64: extraction.base64,
+          fileName: selectedFile.name,
+          mode: result.mode,
+          provider,
+          pageRange: {
+            startPage: extraction.startPage,
+            endPage: extraction.endPage,
+            totalPages: extraction.totalPages ?? totalPages,
+          },
+        }),
+      });
+
+      let data: GenerateApiResponse = {};
+      try {
+        data = (await response.json()) as GenerateApiResponse;
+      } catch {
+        // Non-JSON response fallback
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          data.error ||
+            `다음 구간 변환 중 서버 오류가 발생했습니다. (HTTP ${response.status})`
+        );
+      }
+
+      const nextParagraphs =
+        Array.isArray(data.paragraphs) && data.paragraphs.length > 0
+          ? data.paragraphs
+          : (data.script ?? '')
+              .split(/\n{2,}|\n/)
+              .map((p) => p.trim())
+              .filter(Boolean);
+
+      setResult((prev) => {
+        if (!prev) return prev;
+        const mergedParagraphs = [...prev.paragraphs, ...nextParagraphs];
+        return {
+          ...prev,
+          paragraphs: mergedParagraphs,
+          script: mergedParagraphs.join('\n\n'),
+          splitProgress: prev.splitProgress
+            ? {
+                ...prev.splitProgress,
+                convertedUpToPage: extraction.endPage,
+              }
+            : undefined,
+        };
+      });
+
+      showToast(
+        `${extraction.startPage}~${extraction.endPage}페이지 대본이 이어서 추가되었습니다.`
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : '다음 구간 대본 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.';
+      setApiError(message);
+    } finally {
+      setIsConvertingNextChunk(false);
     }
   };
 
@@ -176,6 +428,12 @@ export default function App() {
     }
   };
 
+  const handleClearUsageHistory = () => {
+    clearUsageHistory();
+    setUsageHistory([]);
+    showToast('사용량 기록을 초기화했습니다.');
+  };
+
   return (
     <div
       id="top"
@@ -184,6 +442,7 @@ export default function App() {
       <Header
         theme={theme}
         onToggleTheme={toggleTheme}
+        onOpenUsageDashboard={() => setIsUsageDashboardOpen(true)}
         onOpenWaitlist={() => setIsWaitlistOpen(true)}
       />
 
@@ -224,11 +483,15 @@ export default function App() {
           <div className="lg:sticky lg:top-6">
             <UploadPanel
               selectedFile={selectedFile}
+              fileMetadata={fileMetadata}
+              isInspectingPdf={isInspectingPdf}
               mode={mode}
+              provider={provider}
               isGenerating={isGenerating}
               fileError={fileError}
               onFileSelect={handleFileSelect}
               onModeChange={setMode}
+              onProviderChange={setProvider}
               onGenerate={handleGenerate}
               inputRef={fileInputRef}
             />
@@ -251,13 +514,22 @@ export default function App() {
             <ScriptViewer
               result={result}
               isGenerating={isGenerating}
+              isConvertingNextChunk={isConvertingNextChunk}
+              canContinueChunk={Boolean(
+                selectedFile && result && selectedFile.name === result.fileName
+              )}
               activeIndex={player.activeIndex}
               playbackStatus={player.status}
+              playbackRate={player.rate}
               onSelectParagraph={player.playFromIndex}
               onTriggerUpload={() => fileInputRef.current?.click()}
+              onContinueNextChunk={handleContinueNextChunk}
             />
           </section>
         </div>
+
+        {/* Collapsible FAQ Accordion above Footer */}
+        <FaqSection onOpenWaitlist={() => setIsWaitlistOpen(true)} />
       </main>
 
       <Footer onAdminExportCsv={handleAdminExportCsv} />
@@ -266,6 +538,14 @@ export default function App() {
         isOpen={isWaitlistOpen}
         onClose={() => setIsWaitlistOpen(false)}
         onSubmit={handleWaitlistSubmit}
+      />
+
+      <UsageDashboardModal
+        isOpen={isUsageDashboardOpen}
+        theme={theme}
+        history={usageHistory}
+        onClose={() => setIsUsageDashboardOpen(false)}
+        onClearHistory={handleClearUsageHistory}
       />
 
       {toastMessage && (

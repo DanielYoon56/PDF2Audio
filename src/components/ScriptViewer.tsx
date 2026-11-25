@@ -1,20 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react';
 import {
+  ArrowRight,
   Check,
   ChevronDown,
   ChevronUp,
+  Clock,
   Copy,
   Download,
   Eraser,
   FileAudio2,
+  FileDown,
   Highlighter,
+  Info,
+  Layers,
   Loader2,
   Play,
   Quote,
   Search,
   StickyNote,
   Trash2,
+  Type as TypeIcon,
   X,
 } from 'lucide-react';
 import type {
@@ -26,14 +32,19 @@ import type {
   TextHighlightRange,
 } from '../types/audiobook';
 import { downloadTextFile, estimateReadingMinutes } from '../utils/fileHelpers';
+import { exportScriptToPdf } from '../utils/pdfExport';
 
 interface ScriptViewerProps {
   result: GeneratedScriptResult | null;
   isGenerating: boolean;
+  isConvertingNextChunk: boolean;
+  canContinueChunk: boolean;
   activeIndex: number | null;
   playbackStatus: PlaybackStatus;
+  playbackRate: number;
   onSelectParagraph: (index: number) => void;
   onTriggerUpload: () => void;
+  onContinueNextChunk: () => void;
 }
 
 interface SearchMatch {
@@ -93,12 +104,14 @@ function getSwatch(color: HighlightColor) {
 }
 
 function getAnnotationStorageKey(fileName: string): string {
-  return `paperaudio_annotations_v1:${fileName}`;
+  return `pdf2audio_annotations_v1:${fileName}`;
 }
 
 function loadAnnotations(fileName: string): DocumentAnnotations {
   try {
-    const raw = window.localStorage.getItem(getAnnotationStorageKey(fileName));
+    const raw =
+      window.localStorage.getItem(getAnnotationStorageKey(fileName)) ??
+      window.localStorage.getItem(`paperaudio_annotations_v1:${fileName}`);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === 'object' ? (parsed as DocumentAnnotations) : {};
@@ -135,7 +148,6 @@ function getOffsetWithinElement(
     current = walker.nextNode();
   }
 
-  // Fallback when browser selects at an element boundary
   if (targetNode === rootEl) {
     let offset = 0;
     for (let i = 0; i < targetOffset && i < rootEl.childNodes.length; i++) {
@@ -191,7 +203,6 @@ function buildAnnotatedSegments(
     const end = sorted[i + 1];
     if (end <= start) continue;
 
-    // Latest highlight covering this segment wins
     let matchedHighlight: TextHighlightRange | undefined;
     for (let rIdx = ranges.length - 1; rIdx >= 0; rIdx--) {
       const r = ranges[rIdx];
@@ -222,12 +233,17 @@ function buildAnnotatedSegments(
 export function ScriptViewer({
   result,
   isGenerating,
+  isConvertingNextChunk,
+  canContinueChunk,
   activeIndex,
   playbackStatus,
+  playbackRate,
   onSelectParagraph,
   onTriggerUpload,
+  onContinueNextChunk,
 }: ScriptViewerProps) {
   const [copied, setCopied] = useState(false);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeMatchCursor, setActiveMatchCursor] = useState(0);
   const [showAnnotatedOnly, setShowAnnotatedOnly] = useState(false);
@@ -242,7 +258,8 @@ export function ScriptViewer({
   const paragraphTextRefs = useRef<(HTMLParagraphElement | null)[]>([]);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Load saved annotations when document changes
+  const resultIdentity = result ? `${result.fileName}::${result.generatedAt}` : '';
+
   useEffect(() => {
     if (!result) {
       setAnnotations({});
@@ -259,9 +276,9 @@ export function ScriptViewer({
     setOpenMemoIndex(null);
     setSelectionPopover(null);
     setShowAnnotatedOnly(false);
-  }, [result]);
+  }, [resultIdentity]);
 
-  // Smoothly scroll currently playing paragraph into the vertical center of viewport
+  // Smoothly center the currently playing paragraph
   useEffect(() => {
     if (activeIndex === null) return;
     const node = paragraphCardRefs.current[activeIndex];
@@ -278,7 +295,6 @@ export function ScriptViewer({
     return () => window.cancelAnimationFrame(frameId);
   }, [activeIndex]);
 
-  // Dismiss selection popover on Escape or scroll
   useEffect(() => {
     if (!selectionPopover) return;
 
@@ -295,7 +311,6 @@ export function ScriptViewer({
     };
   }, [selectionPopover]);
 
-  // Compute all search matches across paragraphs
   const searchMatches = useMemo<SearchMatch[]>(() => {
     if (!result) return [];
     const trimmed = searchQuery.trim();
@@ -325,12 +340,24 @@ export function ScriptViewer({
     return matches;
   }, [result, searchQuery]);
 
-  // Reset match cursor when query changes
+  // Auto-scroll to first matched paragraph whenever search results update
   useEffect(() => {
     setActiveMatchCursor(0);
-  }, [searchQuery]);
+    if (searchMatches.length === 0) return;
+    const firstMatch = searchMatches[0];
+    const card = paragraphCardRefs.current[firstMatch.paragraphIndex];
+    if (card) {
+      const frameId = window.requestAnimationFrame(() => {
+        card.scrollIntoView({
+          behavior: 'smooth',
+          block: 'center',
+          inline: 'nearest',
+        });
+      });
+      return () => window.cancelAnimationFrame(frameId);
+    }
+  }, [searchMatches]);
 
-  // Scroll to active search match smoothly when jumping between matches
   const scrollToMatch = (matchIndex: number) => {
     const match = searchMatches[matchIndex];
     if (!match) return;
@@ -369,6 +396,7 @@ export function ScriptViewer({
       }
     } else if (event.key === 'Escape') {
       setSearchQuery('');
+      searchInputRef.current?.blur();
     }
   };
 
@@ -549,7 +577,6 @@ export function ScriptViewer({
   const handleParagraphClick = (paragraphIndex: number) => {
     const selectedText = window.getSelection()?.toString().trim();
     if (selectedText && selectedText.length > 0) {
-      // User was dragging to select/highlight text; don't interrupt with click-to-play
       return;
     }
     setSelectionPopover(null);
@@ -576,9 +603,19 @@ export function ScriptViewer({
     }
   };
 
-  const handleDownload = () => {
+  const handleDownloadTxt = () => {
     if (!result) return;
     downloadTextFile(result.script, result.fileName);
+  };
+
+  const handleExportPdf = async () => {
+    if (!result || isExportingPdf) return;
+    setIsExportingPdf(true);
+    try {
+      await exportScriptToPdf(result);
+    } finally {
+      setIsExportingPdf(false);
+    }
   };
 
   const annotatedCount = useMemo(() => {
@@ -648,7 +685,7 @@ export function ScriptViewer({
         <div className="mt-6 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-xs text-slate-400 dark:text-slate-500">
           <span>01. PDF 업로드</span>
           <span aria-hidden="true">·</span>
-          <span>02. Gemini 전체 낭독 대본 생성</span>
+          <span>02. AI 낭독 대본 생성</span>
           <span aria-hidden="true">·</span>
           <span>03. 문단 클릭 재생 및 형광펜 메모</span>
         </div>
@@ -664,20 +701,110 @@ export function ScriptViewer({
     );
   }
 
-  const estimatedMinutes = estimateReadingMinutes(
+  const baseEstimatedMinutes = estimateReadingMinutes(
     result.script,
     result.detectedLanguage === 'ko-KR'
   );
+  const adjustedMinutes = Math.max(
+    1,
+    Math.round(baseEstimatedMinutes / Math.max(0.5, playbackRate))
+  );
+  const totalChars = result.script.length;
+  const totalCharsNoSpaces = result.script.replace(/\s+/g, '').length;
+
   const displayTitle = result.fileName.replace(/\.pdf$/i, '');
   const modeLabel =
-    result.mode === 'ko-translate' ? '한국어 번역 정제' : '원문 낭독 정제';
+    result.mode === 'ko-summary'
+      ? '핵심 요약 (약 30%)'
+      : result.mode === 'ko-translate'
+      ? '한국어 번역 정제'
+      : '원문 낭독 정제';
+  const engineLabel =
+    result.providerUsed === 'openrouter'
+      ? 'OpenRouter (Claude)'
+      : 'Gemini 2.5 Flash';
 
   const visibleIndices = result.paragraphs
     .map((_, idx) => idx)
     .filter((idx) => !showAnnotatedOnly || Boolean(annotations[idx]));
 
+  const splitProgress = result.splitProgress;
+  const hasRemainingPages = Boolean(
+    splitProgress &&
+      splitProgress.isAutoSplit &&
+      splitProgress.convertedUpToPage < splitProgress.totalPages
+  );
+  const nextChunkStart = splitProgress ? splitProgress.convertedUpToPage + 1 : 0;
+  const nextChunkEnd = splitProgress
+    ? Math.min(
+        splitProgress.totalPages,
+        splitProgress.convertedUpToPage + splitProgress.chunkSize
+      )
+    : 0;
+  const splitPercent = splitProgress
+    ? Math.min(
+        100,
+        Math.round(
+          (splitProgress.convertedUpToPage / Math.max(1, splitProgress.totalPages)) *
+            100
+        )
+      )
+    : 100;
+
   return (
-    <div className="flex flex-col transition-colors duration-300">
+    <div className="flex-1 flex flex-col transition-colors duration-300">
+      {/* Optional Auto-Fallback Notice */}
+      {result.fallbackUsed && result.fallbackReason && (
+        <div className="px-4 sm:px-6 py-2.5 bg-indigo-50/80 dark:bg-indigo-950/40 border-b border-indigo-200/70 dark:border-indigo-900/60 flex items-center gap-2 text-xs text-indigo-800 dark:text-indigo-200">
+          <Info className="w-3.5 h-3.5 shrink-0 text-indigo-600 dark:text-indigo-400" aria-hidden="true" />
+          <span>{result.fallbackReason}</span>
+        </div>
+      )}
+
+      {/* Large PDF Auto-Split Progress Bar */}
+      {splitProgress?.isAutoSplit && (
+        <div className="px-4 sm:px-6 py-2.5 bg-blue-50/70 dark:bg-blue-950/35 border-b border-blue-200/70 dark:border-blue-900/60 flex flex-wrap items-center justify-between gap-2.5 text-xs">
+          <div className="flex items-center gap-2 min-w-0">
+            <Layers
+              className="w-3.5 h-3.5 shrink-0 text-blue-600 dark:text-blue-400"
+              aria-hidden="true"
+            />
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-blue-900 dark:text-blue-200">
+              <span className="font-semibold">대용량 자동 분할</span>
+              <span className="font-mono tabular-nums text-blue-700 dark:text-blue-300">
+                1~{splitProgress.convertedUpToPage}p / 전체 {splitProgress.totalPages}p ({splitPercent}%)
+              </span>
+              {!hasRemainingPages && (
+                <span className="text-emerald-700 dark:text-emerald-300 font-medium">
+                  · 전체 구간 변환 완료
+                </span>
+              )}
+            </div>
+          </div>
+
+          {hasRemainingPages && canContinueChunk && (
+            <button
+              type="button"
+              onClick={onContinueNextChunk}
+              disabled={isConvertingNextChunk}
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 dark:disabled:bg-blue-800 text-white text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+            >
+              {isConvertingNextChunk ? (
+                <>
+                  <Loader2 className="w-3 h-3 animate-spin" aria-hidden="true" />
+                  <span>{nextChunkStart}~{nextChunkEnd}p 변환 중...</span>
+                </>
+              ) : (
+                <>
+                  <span>다음 {nextChunkStart}~{nextChunkEnd}p 이어서 변환</span>
+                  <ArrowRight className="w-3 h-3" aria-hidden="true" />
+                </>
+              )}
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Document Toolbar */}
       <div className="px-4 sm:px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 transition-colors duration-300">
         <div className="min-w-0">
@@ -688,17 +815,17 @@ export function ScriptViewer({
             {displayTitle}
           </h2>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-            <span className="tabular-nums">{result.paragraphs.length}개 문단</span>
-            <span aria-hidden="true">·</span>
-            <span className="tabular-nums">예상 청취 약 {estimatedMinutes}분</span>
-            <span aria-hidden="true">·</span>
             <span>{modeLabel}</span>
+            <span aria-hidden="true">·</span>
+            <span>{result.category}</span>
+            <span aria-hidden="true">·</span>
+            <span>{engineLabel}</span>
             <span aria-hidden="true">·</span>
             <span>클릭 재생 / 드래그 형광펜</span>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 shrink-0">
           <button
             type="button"
             onClick={handleCopy}
@@ -725,7 +852,7 @@ export function ScriptViewer({
 
           <button
             type="button"
-            onClick={handleDownload}
+            onClick={handleDownloadTxt}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
           >
             <Download
@@ -733,6 +860,23 @@ export function ScriptViewer({
               aria-hidden="true"
             />
             <span>.txt 다운로드</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleExportPdf}
+            disabled={isExportingPdf}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+          >
+            {isExportingPdf ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600 dark:text-blue-400" aria-hidden="true" />
+            ) : (
+              <FileDown
+                className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400"
+                aria-hidden="true"
+              />
+            )}
+            <span>PDF 저장</span>
           </button>
         </div>
       </div>
@@ -818,7 +962,7 @@ export function ScriptViewer({
       </div>
 
       {/* Synced Paragraph List */}
-      <div className="px-3 sm:px-6 py-5 sm:py-6">
+      <div className="flex-1 px-3 sm:px-6 py-5 sm:py-6">
         {visibleIndices.length === 0 ? (
           <div className="py-12 text-center text-sm text-slate-500 dark:text-slate-400">
             표시할 형광펜 또는 메모 문단이 없습니다.
@@ -860,7 +1004,7 @@ export function ScriptViewer({
                   aria-current={isActive ? 'true' : undefined}
                   className={`group relative rounded-lg pl-4 pr-3.5 py-3.5 transition-colors duration-200 ${cardSurfaceClass}`}
                 >
-                  {/* Animated left vertical progress indicator bar for the active speaking paragraph */}
+                  {/* Animated left vertical progress bar for active speaking paragraph */}
                   {isActive && (
                     <span
                       aria-hidden="true"
@@ -875,7 +1019,6 @@ export function ScriptViewer({
                   )}
 
                   <div className="flex items-start gap-3">
-                    {/* Paragraph play trigger / animated equalizer */}
                     <button
                       type="button"
                       onClick={() => onSelectParagraph(index)}
@@ -911,7 +1054,6 @@ export function ScriptViewer({
                       )}
                     </button>
 
-                    {/* Paragraph body + annotation controls */}
                     <div className="flex-1 min-w-0">
                       <p
                         ref={(el) => {
@@ -1036,7 +1178,6 @@ export function ScriptViewer({
                         )}
                       </div>
 
-                      {/* Saved Memo Display */}
                       {hasMemo && !isMemoOpen && (
                         <div className="mt-2.5 rounded-lg border border-slate-200/90 dark:border-slate-700/80 bg-white/90 dark:bg-slate-800/80 px-3 py-2.5 flex items-start justify-between gap-3 transition-colors duration-300">
                           <div className="min-w-0 flex-1">
@@ -1067,7 +1208,6 @@ export function ScriptViewer({
                         </div>
                       )}
 
-                      {/* Inline Memo Editor */}
                       {isMemoOpen && (
                         <div className="mt-2.5 rounded-lg border border-blue-200 dark:border-blue-800 bg-white dark:bg-slate-900 p-3 space-y-2.5 transition-colors duration-300">
                           <textarea
@@ -1109,11 +1249,80 @@ export function ScriptViewer({
                 </div>
               );
             })}
+
+            {/* Continuation Card for Remaining Pages */}
+            {hasRemainingPages && canContinueChunk && splitProgress && (
+              <div className="mt-6 rounded-xl border border-blue-200/90 dark:border-blue-800/70 bg-blue-50/60 dark:bg-blue-950/30 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3.5">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    1~{splitProgress.convertedUpToPage}페이지까지 변환되었습니다
+                  </p>
+                  <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                    오디오를 들으시는 동안에도 남은 구간({nextChunkStart}~{nextChunkEnd}페이지 / 전체 {splitProgress.totalPages}p)을 끊김 없이 이어서 변환할 수 있습니다.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={onContinueNextChunk}
+                  disabled={isConvertingNextChunk}
+                  className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 dark:disabled:bg-blue-800 text-white text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+                >
+                  {isConvertingNextChunk ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+                      <span>{nextChunkStart}~{nextChunkEnd}p 대본 생성 중...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>다음 {nextChunkStart}~{nextChunkEnd}페이지 이어서 변환</span>
+                      <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
 
-      {/* Floating Selection Highlighter Popover (on mouse drag) */}
+      {/* Bottom Statistics Bar */}
+      <div className="px-4 sm:px-6 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/80 rounded-b-xl flex flex-wrap items-center justify-between gap-3 text-xs text-slate-600 dark:text-slate-400 transition-colors duration-300">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span className="inline-flex items-center gap-1.5">
+            <Clock className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
+            <span>
+              예상 청취 시간{' '}
+              <strong className="font-mono tabular-nums text-slate-900 dark:text-slate-100">
+                약 {adjustedMinutes}분
+              </strong>
+              {playbackRate !== 1.0 && (
+                <span className="ml-1 text-slate-400 dark:text-slate-500 font-mono tabular-nums">
+                  ({playbackRate.toFixed(1)}x 기준 · 1.0x 약 {baseEstimatedMinutes}분)
+                </span>
+              )}
+            </span>
+          </span>
+
+          <span className="inline-flex items-center gap-1.5">
+            <TypeIcon className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500" aria-hidden="true" />
+            <span>
+              전체 글자 수{' '}
+              <strong className="font-mono tabular-nums text-slate-900 dark:text-slate-100">
+                {totalChars.toLocaleString('ko-KR')}자
+              </strong>
+              <span className="ml-1 text-slate-400 dark:text-slate-500 font-mono tabular-nums">
+                (공백 제외 {totalCharsNoSpaces.toLocaleString('ko-KR')}자)
+              </span>
+            </span>
+          </span>
+        </div>
+
+        <span className="font-mono tabular-nums text-slate-400 dark:text-slate-500">
+          총 {result.paragraphs.length}개 문단
+        </span>
+      </div>
+
+      {/* Floating Selection Highlighter Popover */}
       {selectionPopover && (
         <div
           role="toolbar"

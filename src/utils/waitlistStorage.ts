@@ -1,10 +1,13 @@
 import type { WaitlistEntry, WaitlistFormValues } from '../types/audiobook';
 
-const STORAGE_KEY = 'paperaudio_waitlist_entries_v1';
+const STORAGE_KEY = 'pdf2audio_waitlist_entries_v1';
+const LEGACY_STORAGE_KEY = 'paperaudio_waitlist_entries_v1';
 
 export function loadWaitlistEntries(): WaitlistEntry[] {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw =
+      window.localStorage.getItem(STORAGE_KEY) ??
+      window.localStorage.getItem(LEGACY_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? (parsed as WaitlistEntry[]) : [];
@@ -57,13 +60,12 @@ export async function submitWaitlistEntry(
         expectedFeatures: entry.expectedFeatures,
         pricingTier: entry.pricingTier,
         comment: entry.comment,
-        source: 'PaperAudio Demo',
+        source: 'PDF2Audio Demo',
       }),
     });
 
     return { entry, webhookSent: response.ok };
   } catch {
-    // Local storage already captured the entry safely
     return { entry, webhookSent: false };
   }
 }
@@ -95,13 +97,12 @@ export function exportWaitlistCsv(): number {
     .map((row) => row.map((cell) => escapeCsvCell(cell)).join(','))
     .join('\r\n');
 
-  // Prepend UTF-8 BOM so Excel opens Korean text cleanly
   const blob = new Blob(['\uFEFF' + csvBody], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   const dateStamp = new Date().toISOString().slice(0, 10);
   link.href = url;
-  link.download = `paperaudio_waitlist_${dateStamp}.csv`;
+  link.download = `pdf2audio_waitlist_${dateStamp}.csv`;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);

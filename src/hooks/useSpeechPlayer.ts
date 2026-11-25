@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { DetectedLanguage, PlaybackRate, PlaybackStatus } from '../types/audiobook';
+import type { DetectedLanguage, PlaybackStatus } from '../types/audiobook';
 
 interface UseSpeechPlayerOptions {
   paragraphs: string[];
@@ -10,7 +10,10 @@ export interface SpeechPlayerState {
   isSupported: boolean;
   status: PlaybackStatus;
   activeIndex: number | null;
-  rate: PlaybackRate;
+  rate: number;
+  pitch: number;
+  volume: number;
+  isMuted: boolean;
   voices: SpeechSynthesisVoice[];
   selectedVoiceURI: string;
   speechError: string | null;
@@ -19,7 +22,10 @@ export interface SpeechPlayerState {
   stop: () => void;
   skipPrev: () => void;
   skipNext: () => void;
-  setRate: (rate: PlaybackRate) => void;
+  setRate: (rate: number) => void;
+  setPitch: (pitch: number) => void;
+  setVolume: (volume: number) => void;
+  toggleMute: () => void;
   setVoiceURI: (voiceURI: string) => void;
 }
 
@@ -41,11 +47,17 @@ function pickBestVoice(
   const candidates = exactMatches.length > 0 ? exactMatches : prefixMatches;
   if (candidates.length === 0) return voices[0];
 
-  // Prefer higher-quality neural/natural/Google/Apple voices when available
   const preferred = candidates.find((v) =>
     /natural|google|yuna|sora|samantha|enhanced|premium/i.test(v.name)
   );
   return preferred ?? candidates.find((v) => v.default) ?? candidates[0];
+}
+
+interface SpeechOverrides {
+  rate?: number;
+  pitch?: number;
+  volume?: number;
+  voiceURI?: string;
 }
 
 export function useSpeechPlayer({
@@ -61,12 +73,18 @@ export function useSpeechPlayer({
   const [selectedVoiceURI, setSelectedVoiceURI] = useState<string>('');
   const [status, setStatus] = useState<PlaybackStatus>('idle');
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
-  const [rate, setRateState] = useState<PlaybackRate>(1.0);
+  const [rate, setRateState] = useState<number>(1.0);
+  const [pitch, setPitchState] = useState<number>(1.0);
+  const [volume, setVolumeState] = useState<number>(1.0);
+  const [isMuted, setIsMuted] = useState<boolean>(false);
   const [speechError, setSpeechError] = useState<string | null>(null);
 
   const sessionIdRef = useRef(0);
   const paragraphsRef = useRef<string[]>(paragraphs);
-  const rateRef = useRef<PlaybackRate>(rate);
+  const rateRef = useRef<number>(rate);
+  const pitchRef = useRef<number>(pitch);
+  const volumeRef = useRef<number>(volume);
+  const lastNonZeroVolumeRef = useRef<number>(1.0);
   const voiceURIRef = useRef<string>(selectedVoiceURI);
   const voicesRef = useRef<SpeechSynthesisVoice[]>(voices);
   const targetLangRef = useRef<DetectedLanguage>(targetLanguage);
@@ -75,13 +93,14 @@ export function useSpeechPlayer({
 
   paragraphsRef.current = paragraphs;
   rateRef.current = rate;
+  pitchRef.current = pitch;
+  volumeRef.current = isMuted ? 0 : volume;
   voiceURIRef.current = selectedVoiceURI;
   voicesRef.current = voices;
   targetLangRef.current = targetLanguage;
   activeIndexRef.current = activeIndex;
   statusRef.current = status;
 
-  // Load browser voices and listen for async voiceschanged
   useEffect(() => {
     if (!isSupported) return;
     const synth = window.speechSynthesis;
@@ -100,7 +119,6 @@ export function useSpeechPlayer({
     };
   }, [isSupported]);
 
-  // Auto-select voice when voices load or target language changes
   useEffect(() => {
     if (voices.length === 0) return;
     const best = pickBestVoice(voices, targetLanguage);
@@ -110,7 +128,6 @@ export function useSpeechPlayer({
     }
   }, [voices, targetLanguage]);
 
-  // Stop playback whenever a new script is loaded or on unmount
   useEffect(() => {
     if (!isSupported) return;
     sessionIdRef.current += 1;
@@ -126,7 +143,7 @@ export function useSpeechPlayer({
   }, [isSupported, paragraphs]);
 
   const speakParagraph = useCallback(
-    (index: number, overrideRate?: PlaybackRate, overrideVoiceURI?: string) => {
+    (index: number, overrides?: SpeechOverrides) => {
       if (!isSupported) return;
       const list = paragraphsRef.current;
       if (index < 0 || index >= list.length) {
@@ -147,10 +164,14 @@ export function useSpeechPlayer({
       setStatus('playing');
 
       const utterance = new SpeechSynthesisUtterance(list[index]);
-      const effectiveRate = overrideRate ?? rateRef.current;
-      const effectiveVoiceURI = overrideVoiceURI ?? voiceURIRef.current;
+      const effectiveRate = overrides?.rate ?? rateRef.current;
+      const effectivePitch = overrides?.pitch ?? pitchRef.current;
+      const effectiveVolume = overrides?.volume ?? volumeRef.current;
+      const effectiveVoiceURI = overrides?.voiceURI ?? voiceURIRef.current;
 
-      utterance.rate = effectiveRate;
+      utterance.rate = Math.max(0.5, Math.min(2.0, effectiveRate));
+      utterance.pitch = Math.max(0.5, Math.min(1.5, effectivePitch));
+      utterance.volume = Math.max(0, Math.min(1, effectiveVolume));
       utterance.lang = targetLangRef.current;
 
       const matchedVoice = voicesRef.current.find(
@@ -242,28 +263,77 @@ export function useSpeechPlayer({
   }, [speakParagraph]);
 
   const setRate = useCallback(
-    (newRate: PlaybackRate) => {
-      setRateState(newRate);
-      rateRef.current = newRate;
+    (newRate: number) => {
+      const clamped = Math.round(Math.max(0.5, Math.min(2.0, newRate)) * 10) / 10;
+      setRateState(clamped);
+      rateRef.current = clamped;
       if (statusRef.current === 'playing' && activeIndexRef.current !== null) {
-        speakParagraph(activeIndexRef.current, newRate, voiceURIRef.current);
+        speakParagraph(activeIndexRef.current, { rate: clamped });
       }
     },
     [speakParagraph]
   );
+
+  const setPitch = useCallback(
+    (newPitch: number) => {
+      const clamped = Math.round(Math.max(0.5, Math.min(1.5, newPitch)) * 20) / 20;
+      setPitchState(clamped);
+      pitchRef.current = clamped;
+      if (statusRef.current === 'playing' && activeIndexRef.current !== null) {
+        speakParagraph(activeIndexRef.current, { pitch: clamped });
+      }
+    },
+    [speakParagraph]
+  );
+
+  const setVolume = useCallback(
+    (newVolume: number) => {
+      const clamped = Math.round(Math.max(0, Math.min(1, newVolume)) * 20) / 20;
+      setVolumeState(clamped);
+      if (clamped > 0) {
+        lastNonZeroVolumeRef.current = clamped;
+        setIsMuted(false);
+      } else {
+        setIsMuted(true);
+      }
+      volumeRef.current = clamped;
+      if (statusRef.current === 'playing' && activeIndexRef.current !== null) {
+        speakParagraph(activeIndexRef.current, { volume: clamped });
+      }
+    },
+    [speakParagraph]
+  );
+
+  const toggleMute = useCallback(() => {
+    if (isMuted || volumeRef.current === 0) {
+      const restored = lastNonZeroVolumeRef.current > 0 ? lastNonZeroVolumeRef.current : 1.0;
+      setIsMuted(false);
+      setVolumeState(restored);
+      volumeRef.current = restored;
+      if (statusRef.current === 'playing' && activeIndexRef.current !== null) {
+        speakParagraph(activeIndexRef.current, { volume: restored });
+      }
+    } else {
+      lastNonZeroVolumeRef.current = volumeRef.current;
+      setIsMuted(true);
+      volumeRef.current = 0;
+      if (statusRef.current === 'playing' && activeIndexRef.current !== null) {
+        speakParagraph(activeIndexRef.current, { volume: 0 });
+      }
+    }
+  }, [isMuted, speakParagraph]);
 
   const setVoiceURI = useCallback(
     (newURI: string) => {
       setSelectedVoiceURI(newURI);
       voiceURIRef.current = newURI;
       if (statusRef.current === 'playing' && activeIndexRef.current !== null) {
-        speakParagraph(activeIndexRef.current, rateRef.current, newURI);
+        speakParagraph(activeIndexRef.current, { voiceURI: newURI });
       }
     },
     [speakParagraph]
   );
 
-  // Sort voices so target language voices appear at the top of the dropdown
   const sortedVoices = useMemo(() => {
     const prefix = targetLanguage.toLowerCase().split('-')[0];
     return [...voices].sort((a, b) => {
@@ -279,6 +349,9 @@ export function useSpeechPlayer({
     status,
     activeIndex,
     rate,
+    pitch,
+    volume: isMuted ? 0 : volume,
+    isMuted,
     voices: sortedVoices,
     selectedVoiceURI,
     speechError,
@@ -288,6 +361,9 @@ export function useSpeechPlayer({
     skipPrev,
     skipNext,
     setRate,
+    setPitch,
+    setVolume,
+    toggleMute,
     setVoiceURI,
   };
 }

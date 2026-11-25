@@ -4,8 +4,7 @@
 
 출퇴근길이나 산책 중 영문 논문(arXiv)이나 해외 리포트를 눈으로 읽기 어려울 때, PDF 파일을 올리기만 하면 **원문의 논리와 수치를 누락 없이 자연스러운 한국어 낭독 대본으로 변환**하고 즉시 들을 수 있는 React 웹 애플리케이션입니다.
 
-👉 **[https://pdf2audio.ai.studio]([https://pdf2audio.ai.studio])** *(회원가입 없음 · 무료 체험)*
-
+👉 **[GitHub 저장소 (DanielYoon56/PDF2Audio)](https://github.com/DanielYoon56/PDF2Audio)** *(로컬에서 본인 API 키로 안전하게 실행)*
 ---
 
 ## 💡 왜 만들었나요?
@@ -16,16 +15,16 @@
 
 ---
 
-## ✨ 주요 기능 (v1.0 Web Demo)
+## ✨ 주요 기능 (v1.0)
 
-* **2단 논문 레이아웃 자동 인식**: PDF 파일을 `gemini-2.5-flash` 모델에 직접 전달해 다단(Multi-column) 학술 논문도 문맥 꼬임 없이 정확하게 읽습니다.
-* **원문 보존형 한국어 번역 & 낭독 정제**: 딱딱한 번역투 대신 정중한 한국어 구어체(`~합니다`)로 변환하며, 수식이나 기호(퍼센트, 부등호, 그리스 문자 등)를 귀로 이해하기 쉬운 말로 풀어 씁니다. *(원문 언어 그대로 정제 모드도 지원)*
+* **2단 논문 레이아웃 자동 인식 & AI 엔진 자동 전환**: PDF 파일을 `gemini-2.5-flash` 모델로 우선 변환하며, 요청 한도 초과나 지연 시 **OpenRouter (Claude)**로 자동 전환합니다.
+* **대용량 PDF 자동 분할 (2MB 이상 → 첫 15페이지 우선 변환)**: 2MB를 초과하는 긴 문서는 브라우저에서 첫 15페이지를 먼저 분할 변환해 즉시 청취를 시작하고, 재생 중에도 다음 구간을 이어서 변환할 수 있습니다.
+* **3가지 변환 모드**: 원문 보존형 한국어 번역 정제, 논리·수치를 유지한 **핵심 요약 모드(약 30% 분량)**, 원문 언어 그대로 낭독용 정제를 지원합니다.
 * **싱크형 대본 뷰어 & 오디오 플레이어**:
-  * 브라우저 내장 Web Speech API를 통해 별도 설치 없이 즉시 음성 재생
-  * 배속 조절 (`0.8x` ~ `1.5x`) 및 음성 선택 지원
-  * 현재 낭독 중인 문단 자동 하이라이트 및 문단 클릭 시 해당 위치부터 바로 재생
-  * 정제된 대본 원클릭 복사 및 `.txt` 파일 다운로드
-* **테스트용 샘플 논문 제공**: 당장 올릴 PDF가 없는 방문자도 바로 체험할 수 있도록 유명 AI 논문 다운로드 링크를 기본 제공합니다.
+  * Web Speech API 기반 속도(`0.5x`~`2.0x`)·음높이·볼륨 슬라이더, 시스템 음성 선택, 단축키(`Space`, `←/→`, `Esc`) 및 스크롤 플로팅 미니 플레이어
+  * 현재 낭독 문단 자동 하이라이트, 실시간 검색 자동 스크롤, 형광펜·메모, `.txt` 및 **PDF 깔끔한 내보내기(jsPDF)**
+  * Recharts 기반 **사용량 대시보드** (변환 논문 수, 총 청취 시간, 카테고리 분포)
+* **테스트용 샘플 논문 제공**: 당장 올릴 PDF가 없어도 바로 테스트할 수 있도록 유명 AI 논문 링크를 제공합니다.
   * [Attention Is All You Need (15p)](https://arxiv.org/pdf/1706.03762.pdf)
   * [Deep Residual Learning / ResNet 2단 논문 (12p)](https://arxiv.org/pdf/1512.03385.pdf)
 
@@ -33,10 +32,9 @@
 
 ## 🛠️ 기술 스택
 
-* **Frontend**: React, Tailwind CSS, `lucide-react`
-* **AI Engine**: Google `@google/genai` SDK (`gemini-2.5-flash`)
-* **Audio (Demo)**: Browser Web Speech API (`window.speechSynthesis`)
-* **Prototype & Build**: Google AI Studio
+* **Frontend**: React, Tailwind CSS, `lucide-react`, `recharts`, `pdf-lib`, `jspdf`
+* **Backend & AI Engine**: Express (`server.ts`), Google `@google/genai` SDK (`gemini-2.5-flash`), OpenRouter API (`anthropic/claude-sonnet-4.5` 자동 폴백)
+* **Audio**: Browser Web Speech API (`window.speechSynthesis`)
 
 ---
 
@@ -51,16 +49,23 @@ cd PDF2Audio
 npm install
 ```
 
-### 2. 환경 변수 설정
-프로젝트 루트 폴더에 `.env.local` 파일을 생성하고 [Google AI Studio](https://aistudio.google.com/)에서 발급받은 API 키를 입력합니다.
+### 2. 본인 API 키 설정 (`.env`)
+이 저장소에는 API 키가 포함되어 있지 않습니다. `.env.example`을 복사해 `.env` 파일을 만들고, **본인의 API 키**를 입력해 주세요.
+```bash
+cp .env.example .env
+```
 ```env
-GEMINI_API_KEY=여기에_GEMINI_API_KEY_입력
+GEMINI_API_KEY="본인의_GEMINI_API_KEY"
+# 선택: Gemini 한도 초과 시 자동 전환할 OpenRouter API 키
+OPENROUTER_API_KEY="본인의_OPENROUTER_API_KEY"
+OPENROUTER_MODEL="anthropic/claude-sonnet-4.5"
 ```
 
 ### 3. 개발 서버 실행
 ```bash
 npm run dev
 ```
+실행 후 브라우저에서 `http://localhost:3000`으로 접속하세요.
 
 ---
 
